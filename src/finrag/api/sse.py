@@ -31,5 +31,36 @@ async def stream_graph(graph, state: dict, *, request_id: str) -> AsyncIterator[
     - 끝에 done. 예외가 나면 error 이벤트(연결만 끊으면 클라이언트가 원인을 모른다).
     테스트는 tests/test_api.py 의 실습 2 다섯. 모두 가짜 그래프라 LLM 없이 돈다.
     """
-    raise NotImplementedError("7회차 실습 2: api.sse.stream_graph 를 채우세요. 모드 둘(updates · messages)과 이벤트 다섯은 독스트링, 요구사항은 tests/test_api.py 의 실습 2 다섯")
-    yield  # noqa: E303 — 이 줄이 있어야 이 함수가 async generator 로 남는다. 지우지 말고 위의 raise 를 코드로 바꾼다
+    seen_nodes: set[str] = set()
+    final: dict = {}
+    try:
+        async for mode, chunk in graph.astream(state, stream_mode=["updates", "messages"]):
+            if mode == "updates":
+                for node, payload in chunk.items():
+                    if node not in seen_nodes:
+                        seen_nodes.add(node)
+                        yield event("node_start", {"node": node})
+                    if isinstance(payload, dict):
+                        final.update(payload)
+                        if payload.get("hits"):
+                            yield event("citation", [
+                                {"chunk_id": h["chunk_id"], "doc_id": h.get("doc_id", ""),
+                                 "article": h.get("article", ""),
+                                 "page_start": h.get("page_start", 0)}
+                                for h in payload["hits"][:8]])
+            elif mode == "messages":
+                msg, meta = chunk
+                node = meta.get("langgraph_node")
+                if node in ANSWER_NODES and getattr(msg, "content", ""):
+                    # 토큰이 그 노드의 updates 보다 먼저 도착한다. 배지가 답변보다
+                    # 늦게 켜지면 사용자는 어디서 나온 글자인지 모른다. 여기서 먼저 알린다.
+                    if node not in seen_nodes:
+                        seen_nodes.add(node)
+                        yield event("node_start", {"node": node})
+                    yield event("token", {"text": msg.content})
+        yield event("done", {"request_id": request_id,
+                             "abstained": bool(final.get("abstained")),
+                             "answer": final.get("answer", ""),
+                             "notices": final.get("notices", [])})
+    except Exception as e:  # 스트림 중 실패도 이벤트로 알린다. 연결만 끊으면 원인을 모른다.
+        yield event("error", {"message": f"{type(e).__name__}: {e}"})

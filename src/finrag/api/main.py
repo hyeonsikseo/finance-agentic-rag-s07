@@ -113,7 +113,24 @@ def ask(request: Request, body: AskRequest,
     테스트는 tests/test_api.py 의 실습 1 다섯. 빠뜨리기 쉬운 것은 basis_date 와 감사 로그다.
     답변 문자열만 반환하면 테스트가 아니라 고객이 거절한다.
     """
-    raise NotImplementedError("7회차 실습 1: api.main.ask 를 채우세요. 순서는 독스트링, 요구사항은 tests/test_api.py 의 실습 1 다섯")
+    rid = uuid.uuid4().hex[:12]
+    t0 = time.perf_counter()
+    out, usage = run_graph(body.question)
+    latency = round((time.perf_counter() - t0) * 1000, 1)
+
+    resp = AskResponse(
+        answer=out.get("answer", ""), notices=out.get("notices", []),
+        basis_date=body.as_of or date.today().isoformat(),
+        sources=sources_from(out.get("hits", [])),
+        abstained=bool(out.get("abstained")), abstain_reason=out.get("abstain_reason", ""),
+        escalation_reason=out.get("escalation_reason", ""),
+        policy_version=policy()["policy_version"], request_id=rid,
+        latency_ms=latency, retry_count=out.get("retry_count", 0), usage=usage)
+
+    audit.write(request_id=rid, api_key_id=key_id, question=body.question,
+                response=resp.model_dump(), model=s.llm_model_main,
+                policy_version=resp.policy_version, latency_ms=latency, usage=usage)
+    return resp
 
 
 @app.post("/ask/stream")
